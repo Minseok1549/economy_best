@@ -2,31 +2,16 @@ from __future__ import annotations
 
 import datetime as dt
 
-import FinanceDataReader as fdr
-import lightgbm as lgb
+import FinanceDataReader as fdr  # 실시간 데이터 로드를 위해 추가
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import torch
-import torch.nn as nn
-from plotly.subplots import make_subplots
-from sklearn.preprocessing import MinMaxScaler
-
-# pmdarima를 삭제하고 statsmodels의 ARIMA만 사용합니다.
-from statsmodels.tsa.arima.model import ARIMA
 
 
-# --- 기술적 지표 함수 (수정 없음) ---
+# --- 기술적 지표 계산 함수 (기존과 동일) ---
 def calculate_ma(close_prices: pd.Series, window: int) -> pd.Series:
     return close_prices.rolling(window=window).mean()
-
-
-def interpret_ma_cross(short_ma: pd.Series, long_ma: pd.Series) -> pd.Series:
-    signals = pd.Series(index=short_ma.index, data="Hold")
-    signals[(short_ma.shift(1) < long_ma.shift(1)) & (short_ma > long_ma)] = "Buy"
-    signals[(short_ma.shift(1) > long_ma.shift(1)) & (short_ma < long_ma)] = "Sell"
-    return signals
 
 
 def calculate_rsi(close_prices: pd.Series, window: int = 14) -> pd.Series:
@@ -36,15 +21,6 @@ def calculate_rsi(close_prices: pd.Series, window: int = 14) -> pd.Series:
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
-
-
-def interpret_rsi(
-    rsi: pd.Series, overbought_threshold: int = 70, oversold_threshold: int = 30
-) -> pd.Series:
-    signals = pd.Series(index=rsi.index, data="Hold")
-    signals[rsi > overbought_threshold] = "Sell"
-    signals[rsi < oversold_threshold] = "Buy"
-    return signals
 
 
 def calculate_macd(
@@ -63,352 +39,267 @@ def calculate_macd(
     )
 
 
-def interpret_macd(macd_df: pd.DataFrame) -> pd.Series:
-    signals = pd.Series(index=macd_df.index, data="Hold")
-    signals[
-        (macd_df["MACD"].shift(1) < macd_df["Signal"].shift(1))
-        & (macd_df["MACD"] > macd_df["Signal"])
-    ] = "Buy"
-    signals[
-        (macd_df["MACD"].shift(1) > macd_df["Signal"].shift(1))
-        & (macd_df["MACD"] < macd_df["Signal"])
-    ] = "Sell"
+# --- FIX: 데이터 로드 함수 수정 ---
+# 실시간 데이터와 예측 데이터를 분리해서 로드합니다.
+@st.cache_data(ttl=600)  # 10분 동안 캐시 유지
+def load_live_data(ticker):
+    """FinanceDataReader를 사용해 최신 주가 데이터를 불러옵니다."""
+    today = dt.date.today()
+    start_date = today - dt.timedelta(days=730)  # 최근 2년치 데이터
+    try:
+        df = fdr.DataReader(ticker, start_date, today)
+        return df
+    except Exception:
+        return None
+
+
+def load_forecast_data(ticker):
+    """미리 생성된 예측 CSV 파일을 로드합니다."""
+    try:
+        forecast_df = pd.read_csv(
+            f"{ticker}_forecast.csv", index_col=0, parse_dates=True
+        )
+        return forecast_df
+    except FileNotFoundError:
+        return None
+
+
+# --- FIX: 상세한 기술적 분석 신호 해석 함수 ---
+def get_technical_signals(df: pd.DataFrame):
+    """데이터프레임을 받아 각 지표별 매매 신호와 설명을 반환합니다."""
+    signals = {}
+
+    # 1. 이동평균 (MA) 신호
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+    ma_short = f"MA_{st.session_state.ma_short_window}"
+    ma_long = f"MA_{st.session_state.ma_long_window}"
+    df[ma_short] = calculate_ma(df["Close"], st.session_state.ma_short_window)
+    df[ma_long] = calculate_ma(df["Close"], st.session_state.ma_long_window)
+
+    if (
+        df[ma_short].iloc[-1] > df[ma_long].iloc[-1]
+        and df[ma_short].iloc[-2] <= df[ma_long].iloc[-2]
+    ):
+        signals["ma"] = (
+            "🟢 매수",
+            "단기 이동평균선이 장기선을 상향 돌파 (골든 크로스)",
+        )
+    elif (
+        df[ma_short].iloc[-1] < df[ma_long].iloc[-1]
+        and df[ma_short].iloc[-2] >= df[ma_long].iloc[-2]
+    ):
+        signals["ma"] = (
+            "🔴 매도",
+            "단기 이동평균선이 장기선을 하향 돌파 (데드 크로스)",
+        )
+    else:
+        trend = "상승" if df[ma_short].iloc[-1] > df[ma_long].iloc[-1] else "하락"
+        signals["ma"] = ("⚪️ 중립", f"현재 {trend} 추세 유지 중")
+
+    # 2. RSI 신호
+    rsi_val = df["RSI"].iloc[-1]
+    if rsi_val > 70:
+        signals["rsi"] = ("🔴 매도", f"RSI({rsi_val:.1f})가 70 이상으로 과매수 상태")
+    elif rsi_val < 30:
+        signals["rsi"] = ("🟢 매수", f"RSI({rsi_val:.1f})가 30 이하로 과매도 상태")
+    else:
+        signals["rsi"] = ("⚪️ 중립", f"RSI({rsi_val:.1f})가 중립 구간에 위치")
+
+    # 3. MACD 신호
+    if (
+        df["MACD"].iloc[-1] > df["Signal"].iloc[-1]
+        and df["MACD"].iloc[-2] <= df["Signal"].iloc[-2]
+    ):
+        signals["macd"] = ("🟢 매수", "MACD선이 시그널선을 상향 돌파 (골든 크로스)")
+    elif (
+        df["MACD"].iloc[-1] < df["Signal"].iloc[-1]
+        and df["MACD"].iloc[-2] >= df["Signal"].iloc[-2]
+    ):
+        signals["macd"] = ("🔴 매도", "MACD선이 시그널선을 하향 돌파 (데드 크로스)")
+    else:
+        trend = "상승" if df["MACD"].iloc[-1] > df["Signal"].iloc[-1] else "하락"
+        signals["macd"] = ("⚪️ 중립", f"현재 {trend} 추세 유지 중")
+
     return signals
 
 
-# --- 예측 모델 함수 ---
-
-
-# ✨ 1. ARIMA 모델 (pmdarima -> statsmodels로 변경) ✨
-@st.cache_data
-def predict_arima(close_prices: pd.Series, n_periods: int) -> pd.Series:
-    """
-    statsmodels 라이브러리를 사용한 간단한 ARIMA 모델로 예측합니다.
-    order=(5, 1, 0)은 많은 시계열 데이터에 일반적으로 사용되는 파라미터입니다.
-    """
-    model = ARIMA(close_prices, order=(5, 1, 0))
-    model_fit = model.fit()
-    forecast = model_fit.forecast(steps=n_periods)
-    return forecast
-
-
-# 2. LightGBM 모델 (수정 없음)
-@st.cache_data
-def predict_lightgbm(df: pd.DataFrame, n_periods: int) -> pd.Series:
-    df_lgbm = df.copy()
-    df_lgbm["dayofweek"] = df_lgbm.index.dayofweek
-    df_lgbm["month"] = df_lgbm.index.month
-    df_lgbm["year"] = df_lgbm.index.year
-    df_lgbm["lag_1"] = df_lgbm["Close"].shift(1)
-    df_lgbm = df_lgbm.dropna()
-    features = ["dayofweek", "month", "year", "lag_1"]
-    target = "Close"
-    X_train, y_train = df_lgbm[features], df_lgbm[target]
-    model = lgb.LGBMRegressor(random_state=42)
-    model.fit(X_train, y_train)
-    future_dates = pd.date_range(
-        start=df.index[-1] + pd.Timedelta(days=1), periods=n_periods
-    )
-    predictions = []
-    last_known_price = df_lgbm["Close"].iloc[-1]
-    for date in future_dates:
-        features_to_predict = pd.DataFrame(
-            [
-                {
-                    "dayofweek": date.dayofweek,
-                    "month": date.month,
-                    "year": date.year,
-                    "lag_1": last_known_price,
-                }
-            ]
-        )
-        prediction = model.predict(features_to_predict)[0]
-        predictions.append(prediction)
-        last_known_price = prediction
-    return pd.Series(predictions, index=future_dates)
-
-
-# 3. LSTM (PyTorch) 모델 (수정 없음)
-class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_layer_size=50, output_size=1):
-        super().__init__()
-        self.hidden_layer_size = hidden_layer_size
-        self.lstm = nn.LSTM(input_size, hidden_layer_size)
-        self.linear = nn.Linear(hidden_layer_size, output_size)
-        self.hidden_cell = (
-            torch.zeros(1, 1, self.hidden_layer_size),
-            torch.zeros(1, 1, self.hidden_layer_size),
-        )
-
-    def forward(self, input_seq):
-        lstm_out, self.hidden_cell = self.lstm(
-            input_seq.view(len(input_seq), 1, -1), self.hidden_cell
-        )
-        predictions = self.linear(lstm_out.view(len(input_seq), -1))
-        return predictions[-1]
-
-
-@st.cache_data
-def predict_lstm(
-    close_prices: pd.Series, n_periods: int, epochs: int = 100, look_back: int = 15
-) -> pd.Series:
-    scaler = MinMaxScaler(feature_range=(-1, 1))
-    price_scaled = scaler.fit_transform(close_prices.values.reshape(-1, 1))
-    price_scaled = torch.FloatTensor(price_scaled).view(-1)
-
-    def create_inout_sequences(input_data, tw):
-        inout_seq = []
-        L = len(input_data)
-        for i in range(L - tw):
-            train_seq = input_data[i : i + tw]
-            train_label = input_data[i + tw : i + tw + 1]
-            inout_seq.append((train_seq, train_label))
-        return inout_seq
-
-    train_inout_seq = create_inout_sequences(price_scaled, look_back)
-    model = LSTMModel()
-    loss_function = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    for i in range(epochs):
-        for seq, labels in train_inout_seq:
-            optimizer.zero_grad()
-            model.hidden_cell = (
-                torch.zeros(1, 1, model.hidden_layer_size),
-                torch.zeros(1, 1, model.hidden_layer_size),
-            )
-            y_pred = model(seq)
-            single_loss = loss_function(y_pred, labels)
-            single_loss.backward()
-            optimizer.step()
-    test_inputs = price_scaled[-look_back:].tolist()
-    for _ in range(n_periods):
-        seq = torch.FloatTensor(test_inputs[-look_back:])
-        with torch.no_grad():
-            model.hidden = (
-                torch.zeros(1, 1, model.hidden_layer_size),
-                torch.zeros(1, 1, model.hidden_layer_size),
-            )
-            test_inputs.append(model(seq).item())
-    actual_predictions = scaler.inverse_transform(
-        np.array(test_inputs[look_back:]).reshape(-1, 1)
-    )
-    future_dates = pd.date_range(
-        start=close_prices.index[-1] + pd.Timedelta(days=1), periods=n_periods
-    )
-    return pd.Series(actual_predictions.flatten(), index=future_dates)
-
-
+# --- 메인 대시보드 ---
 if __name__ == "__main__":
-    st.set_page_config(layout="wide", page_title="기술적 지표 및 주가 예측 툴")
-    st.title("📈 주식 기술적 지표 분석 및 주가 예측 대시보드")
-    st.markdown(
-        "관심 종목의 주가와 기술적 지표를 시각화하고, 다양한 모델을 통해 미래 주가를 예측합니다."
-    )
+    st.set_page_config(layout="wide", page_title="주가 예측 대시보드")
+    st.title("📈 실시간 기술적 분석 및 내일 주가 예측")
+
+    # --- 사이드바 설정 ---
     st.sidebar.header("⚙️ 설정")
-    ticker = st.sidebar.text_input("종목 코드 (Ticker)", "005930")
-    today = dt.date.today()
-    start_date = st.sidebar.date_input("시작일", today - dt.timedelta(days=730))
-    end_date = st.sidebar.date_input("종료일", today)
-    st.sidebar.subheader("지표 파라미터")
-    ma_short_window = st.sidebar.number_input("단기 이동평균 기간", 5, 50, 20, 1)
-    ma_long_window = st.sidebar.number_input("장기 이동평균 기간", 20, 200, 60, 5)
-    rsi_window = st.sidebar.number_input("RSI 기간", 5, 30, 14, 1)
-    st.sidebar.subheader("📈 예측 설정")
-    forecast_days = st.sidebar.number_input("예측 기간 (일)", 1, 90, 30)
-    if st.sidebar.button("📊 분석 및 예측 시작"):
-        try:
-            df = fdr.DataReader(ticker, start_date, end_date)
-            if df.empty:
-                st.error(
-                    "해당 기간에 대한 데이터가 없습니다. 종목 코드나 기간을 확인해주세요."
-                )
-            else:
-                df["MA_Short"] = calculate_ma(df["Close"], ma_short_window)
-                df["MA_Long"] = calculate_ma(df["Close"], ma_long_window)
-                df["RSI"] = calculate_rsi(df["Close"], rsi_window)
-                macd_df = calculate_macd(df["Close"])
-                df = df.join(macd_df)
-                macd_signals = interpret_macd(df)
-                st.header(f"'{ticker}' 기술적 분석 결과")
-                latest_data = df.iloc[-1]
-                price_change = latest_data["Close"] - df.iloc[-2]["Close"]
-                change_percent = (price_change / df.iloc[-2]["Close"]) * 100
-                col1, col2, col3 = st.columns(3)
-                col1.metric(
-                    "최신 종가",
-                    f"{latest_data['Close']:,.0f} 원",
-                    f"{price_change:,.0f} 원 ({change_percent:.2f}%)",
-                )
-                col2.metric("최신 RSI", f"{latest_data['RSI']:.2f}")
-                col3.metric("최신 MACD 신호", macd_signals.iloc[-1])
+    ticker = st.sidebar.selectbox("종목 코드 (Ticker)", ["005930", "000660", "035720"])
 
-                # --- 예측 모델 실행 (수정 없음) ---
-                with st.spinner("ARIMA 모델로 예측 중..."):
-                    arima_preds = predict_arima(df["Close"], forecast_days)
-                with st.spinner("LightGBM 모델로 예측 중..."):
-                    lgbm_preds = predict_lightgbm(df, forecast_days)
-                with st.spinner("LSTM (Pytorch) 모델로 예측 중..."):
-                    lstm_preds = predict_lstm(df["Close"], forecast_days)
+    # 세션 상태(session_state)를 사용하여 위젯 값을 저장해야 함수 내에서 접근 가능
+    st.session_state.ma_short_window = st.sidebar.number_input(
+        "단기 이동평균", 5, 50, 20, 1
+    )
+    st.session_state.ma_long_window = st.sidebar.number_input(
+        "장기 이동평균", 20, 200, 60, 5
+    )
+    st.session_state.rsi_window = st.sidebar.number_input("RSI 기간", 5, 30, 14, 1)
 
-                forecast_df = pd.DataFrame(
-                    {"ARIMA": arima_preds, "LightGBM": lgbm_preds, "LSTM": lstm_preds}
-                )
-                min_preds = forecast_df.min(axis=1)
-                max_preds = forecast_df.max(axis=1)
-                mean_preds = forecast_df.mean(axis=1)
+    # --- 데이터 로드 ---
+    df = load_live_data(ticker)
+    forecast_df = load_forecast_data(ticker)
 
-                # --- 시각화 (수정 없음) ---
-                fig = make_subplots(
-                    rows=4,
-                    cols=1,
-                    shared_xaxes=True,
-                    vertical_spacing=0.05,
-                    row_heights=[0.5, 0.1, 0.2, 0.2],
+    if df is None:
+        st.error(
+            f"'{ticker}'에 대한 실시간 데이터를 불러오는 데 실패했습니다. 종목 코드를 확인해주세요."
+        )
+    else:
+        # 기술적 지표 계산
+        df["RSI"] = calculate_rsi(df["Close"], st.session_state.rsi_window)
+        macd_df = calculate_macd(df["Close"])
+        df = df.join(macd_df)
+
+        # 신호 해석
+        signals = get_technical_signals(df)
+
+        # --- 종합 신호 요약 ---
+        st.header(f"'{ticker}' 종합 기술적 분석 신호")
+        cols = st.columns(3)
+        with cols[0]:
+            st.subheader("이동평균 (MA)")
+            signal, reason = signals["ma"]
+            st.markdown(f"#### 신호: **{signal}**")
+            st.caption(reason)
+        with cols[1]:
+            st.subheader("RSI")
+            signal, reason = signals["rsi"]
+            st.markdown(f"#### 신호: **{signal}**")
+            st.caption(reason)
+        with cols[2]:
+            st.subheader("MACD")
+            signal, reason = signals["macd"]
+            st.markdown(f"#### 신호: **{signal}**")
+            st.caption(reason)
+
+        st.divider()
+
+        # --- 메인 가격 차트 ---
+        st.header("가격 차트 및 다음 날 예측")
+        fig_price = go.Figure()
+        fig_price.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df["Open"],
+                high=df["High"],
+                low=df["Low"],
+                close=df["Close"],
+                name="캔들차트",
+            )
+        )
+        fig_price.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df[f"MA_{st.session_state.ma_short_window}"],
+                mode="lines",
+                name=f"{st.session_state.ma_short_window}일 이동평균",
+                line=dict(color="green"),
+            )
+        )
+        fig_price.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df[f"MA_{st.session_state.ma_long_window}"],
+                mode="lines",
+                name=f"{st.session_state.ma_long_window}일 이동평균",
+                line=dict(color="red"),
+            )
+        )
+
+        # 예측 데이터가 있을 때만 예측 범위를 표시
+        if forecast_df is not None:
+            next_day = forecast_df.index[0]
+            min_pred = forecast_df.min(axis=1).iloc[0]
+            max_pred = forecast_df.max(axis=1).iloc[0]
+            mean_pred = forecast_df.mean(axis=1).iloc[0]
+
+            # --- FIX: 마우스를 올리면 정보가 보이는 Candlestick 객체로 교체 ---
+            # 기존의 add_shape, add_annotation 코드를 아래 코드로 대체합니다.
+            fig_price.add_trace(
+                go.Candlestick(
+                    x=[next_day],
+                    open=[mean_pred],
+                    high=[max_pred],
+                    low=[min_pred],
+                    close=[mean_pred],
+                    name="내일 예측 범위",
+                    # 색상을 주황색 계열로 통일
+                    increasing_line_color="orange",
+                    decreasing_line_color="orange",
                 )
-                fig.add_trace(
-                    go.Candlestick(
-                        x=df.index,
-                        open=df["Open"],
-                        high=df["High"],
-                        low=df["Low"],
-                        close=df["Close"],
-                        name="캔들차트",
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df.index,
-                        y=df["MA_Short"],
-                        mode="lines",
-                        name=f"MA {ma_short_window}",
-                        line=dict(color="orange"),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df.index,
-                        y=df["MA_Long"],
-                        mode="lines",
-                        name=f"MA {ma_long_window}",
-                        line=dict(color="purple"),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=max_preds.index,
-                        y=max_preds,
-                        mode="lines",
-                        line_color="rgba(0,0,0,0)",
-                        showlegend=False,
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=min_preds.index,
-                        y=min_preds,
-                        mode="lines",
-                        line_color="rgba(0,0,0,0)",
-                        fillcolor="rgba(255, 165, 0, 0.2)",
-                        fill="tonexty",
-                        name="예측 범위",
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=mean_preds.index,
-                        y=mean_preds,
-                        mode="lines",
-                        name="예측 평균",
-                        line=dict(color="orange", dash="dot"),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                colors = [
-                    "green" if row["Open"] - row["Close"] >= 0 else "red"
-                    for index, row in df.iterrows()
-                ]
-                fig.add_trace(
-                    go.Bar(
-                        x=df.index, y=df["Volume"], name="거래량", marker_color=colors
-                    ),
-                    row=2,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df.index,
-                        y=df["RSI"],
-                        mode="lines",
-                        name="RSI",
-                        line=dict(color="blue"),
-                    ),
-                    row=3,
-                    col=1,
-                )
-                fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-                fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
-                fig.add_trace(
-                    go.Scatter(
-                        x=df.index,
-                        y=df["MACD"],
-                        mode="lines",
-                        name="MACD",
-                        line=dict(color="brown"),
-                    ),
-                    row=4,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df.index,
-                        y=df["Signal"],
-                        mode="lines",
-                        name="Signal Line",
-                        line=dict(color="goldenrod"),
-                    ),
-                    row=4,
-                    col=1,
-                )
-                colors_macd = [
-                    "green" if val >= 0 else "red" for val in df["Histogram"]
-                ]
-                fig.add_trace(
-                    go.Bar(
-                        x=df.index,
-                        y=df["Histogram"],
-                        name="Histogram",
-                        marker_color=colors_macd,
-                    ),
-                    row=4,
-                    col=1,
-                )
-                fig.update_layout(
-                    title_text=f"{ticker} 종합 기술적 분석 및 주가 예측",
-                    height=900,
-                    xaxis_rangeslider_visible=False,
-                    legend=dict(
-                        orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
-                    ),
-                )
-                fig.update_yaxes(title_text="가격", row=1, col=1)
-                fig.update_yaxes(title_text="거래량", row=2, col=1)
-                fig.update_yaxes(title_text="RSI", row=3, col=1)
-                fig.update_yaxes(title_text="MACD", row=4, col=1)
-                st.plotly_chart(fig, use_container_width=True)
-                st.header("🔮 모델별 예측 결과")
-                st.dataframe(forecast_df.style.format("{:,.0f}"))
-                with st.expander("상세 데이터 보기"):
-                    st.dataframe(df.iloc[::-1].style.format("{:,.2f}"))
-        except Exception as e:
-            st.error(f"분석 중 오류가 발생했습니다: {e}")
+            )
+
+        else:
+            st.info("다음 날 예측 데이터가 없습니다. 예측 스크립트를 실행해주세요.")
+
+        fig_price.update_layout(
+            yaxis_title="가격 (원)",
+            xaxis_rangeslider_visible=False,
+            height=500,
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+            ),
+        )
+        st.plotly_chart(fig_price, use_container_width=True)
+
+        # --- 보조 지표 차트 ---
+        st.header("보조 지표 상세")
+
+        fig_rsi = go.Figure()
+        fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], mode="lines", name="RSI"))
+        fig_rsi.add_hline(
+            y=70, line_dash="dot", line_color="red", annotation_text="과매수 (70)"
+        )
+        fig_rsi.add_hline(
+            y=30, line_dash="dot", line_color="blue", annotation_text="과매도 (30)"
+        )
+        fig_rsi.update_layout(
+            title="RSI (상대강도지수)",
+            yaxis_title="RSI",
+            height=250,
+            margin=dict(t=30, b=30),
+        )
+        st.plotly_chart(fig_rsi, use_container_width=True)
+
+        # 2. MACD 차트 (Corrected)
+        fig_macd = go.Figure()
+
+        # Add all traces to the figure first
+        fig_macd.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df["MACD"],
+                mode="lines",
+                name="MACD",
+                line=dict(color="blue"),
+            )
+        )
+        fig_macd.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df["Signal"],
+                mode="lines",
+                name="Signal Line",
+                line=dict(color="orange"),
+            )
+        )
+        fig_macd.add_trace(
+            go.Bar(
+                x=df.index,
+                y=df["Histogram"],
+                name="Histogram",
+                marker_color=np.where(df["Histogram"] > 0, "green", "red"),
+            )
+        )
+
+        # Then, update the layout
+        fig_macd.update_layout(title="MACD", height=250, margin=dict(t=30, b=30))
+
+        # Finally, display the chart
+        st.plotly_chart(fig_macd, use_container_width=True)

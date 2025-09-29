@@ -3,7 +3,7 @@ pandas
 finance-datareader
 plotly
 statsmodels
-lightgbm
+xgboost
 scikit-learn
 torch
 numpy
