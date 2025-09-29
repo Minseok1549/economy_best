@@ -3,8 +3,6 @@ from __future__ import annotations
 import datetime as dt
 
 import FinanceDataReader as fdr
-
-# 예측 모델을 위한 라이브러리
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -13,12 +11,13 @@ import streamlit as st
 import torch
 import torch.nn as nn
 from plotly.subplots import make_subplots
-from pmdarima.arima import auto_arima
 from sklearn.preprocessing import MinMaxScaler
+
+# pmdarima를 삭제하고 statsmodels의 ARIMA만 사용합니다.
 from statsmodels.tsa.arima.model import ARIMA
 
 
-# 1. Moving average
+# --- 기술적 지표 함수 (수정 없음) ---
 def calculate_ma(close_prices: pd.Series, window: int) -> pd.Series:
     return close_prices.rolling(window=window).mean()
 
@@ -30,7 +29,6 @@ def interpret_ma_cross(short_ma: pd.Series, long_ma: pd.Series) -> pd.Series:
     return signals
 
 
-# 2. 상대강도지수 (Relative Strength Index, RSI)
 def calculate_rsi(close_prices: pd.Series, window: int = 14) -> pd.Series:
     delta = pd.to_numeric(close_prices.diff(1), errors="coerce")
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -49,7 +47,6 @@ def interpret_rsi(
     return signals
 
 
-# 3. MACD (Moving Average Convergence Divergence)
 def calculate_macd(
     close_prices: pd.Series,
     short_window: int = 12,
@@ -79,28 +76,23 @@ def interpret_macd(macd_df: pd.DataFrame) -> pd.Series:
     return signals
 
 
-# ---  예측 모델 함수 (수정 없음) ---
-# ... (이전 코드와 동일한 예측 모델 함수들) ...
-# 1. ARIMA 모델
+# --- 예측 모델 함수 ---
+
+
+# ✨ 1. ARIMA 모델 (pmdarima -> statsmodels로 변경) ✨
 @st.cache_data
 def predict_arima(close_prices: pd.Series, n_periods: int) -> pd.Series:
-    model = auto_arima(
-        close_prices,
-        start_p=1,
-        start_q=1,
-        max_p=3,
-        max_q=3,
-        m=1,
-        d=1,
-        seasonal=False,
-        trace=False,
-        suppress_warnings=True,
-    )
-    model.fit(close_prices)
-    return model.predict(n_periods=n_periods)
+    """
+    statsmodels 라이브러리를 사용한 간단한 ARIMA 모델로 예측합니다.
+    order=(5, 1, 0)은 많은 시계열 데이터에 일반적으로 사용되는 파라미터입니다.
+    """
+    model = ARIMA(close_prices, order=(5, 1, 0))
+    model_fit = model.fit()
+    forecast = model_fit.forecast(steps=n_periods)
+    return forecast
 
 
-# 2. LightGBM 모델
+# 2. LightGBM 모델 (수정 없음)
 @st.cache_data
 def predict_lightgbm(df: pd.DataFrame, n_periods: int) -> pd.Series:
     df_lgbm = df.copy()
@@ -136,7 +128,7 @@ def predict_lightgbm(df: pd.DataFrame, n_periods: int) -> pd.Series:
     return pd.Series(predictions, index=future_dates)
 
 
-# 3. LSTM (PyTorch) 모델
+# 3. LSTM (PyTorch) 모델 (수정 없음)
 class LSTMModel(nn.Module):
     def __init__(self, input_size=1, hidden_layer_size=50, output_size=1):
         super().__init__()
@@ -212,7 +204,6 @@ if __name__ == "__main__":
     st.markdown(
         "관심 종목의 주가와 기술적 지표를 시각화하고, 다양한 모델을 통해 미래 주가를 예측합니다."
     )
-
     st.sidebar.header("⚙️ 설정")
     ticker = st.sidebar.text_input("종목 코드 (Ticker)", "005930")
     today = dt.date.today()
@@ -224,7 +215,6 @@ if __name__ == "__main__":
     rsi_window = st.sidebar.number_input("RSI 기간", 5, 30, 14, 1)
     st.sidebar.subheader("📈 예측 설정")
     forecast_days = st.sidebar.number_input("예측 기간 (일)", 1, 90, 30)
-
     if st.sidebar.button("📊 분석 및 예측 시작"):
         try:
             df = fdr.DataReader(ticker, start_date, end_date)
@@ -233,14 +223,12 @@ if __name__ == "__main__":
                     "해당 기간에 대한 데이터가 없습니다. 종목 코드나 기간을 확인해주세요."
                 )
             else:
-                # --- 지표 계산 및 신호 해석 (기존과 동일) ---
                 df["MA_Short"] = calculate_ma(df["Close"], ma_short_window)
                 df["MA_Long"] = calculate_ma(df["Close"], ma_long_window)
                 df["RSI"] = calculate_rsi(df["Close"], rsi_window)
                 macd_df = calculate_macd(df["Close"])
                 df = df.join(macd_df)
                 macd_signals = interpret_macd(df)
-
                 st.header(f"'{ticker}' 기술적 분석 결과")
                 latest_data = df.iloc[-1]
                 price_change = latest_data["Close"] - df.iloc[-2]["Close"]
@@ -254,7 +242,7 @@ if __name__ == "__main__":
                 col2.metric("최신 RSI", f"{latest_data['RSI']:.2f}")
                 col3.metric("최신 MACD 신호", macd_signals.iloc[-1])
 
-                # --- 예측 모델 실행 ---
+                # --- 예측 모델 실행 (수정 없음) ---
                 with st.spinner("ARIMA 모델로 예측 중..."):
                     arima_preds = predict_arima(df["Close"], forecast_days)
                 with st.spinner("LightGBM 모델로 예측 중..."):
@@ -262,7 +250,6 @@ if __name__ == "__main__":
                 with st.spinner("LSTM (Pytorch) 모델로 예측 중..."):
                     lstm_preds = predict_lstm(df["Close"], forecast_days)
 
-                # --- 예측 결과 통합 및 범위 계산 ---
                 forecast_df = pd.DataFrame(
                     {"ARIMA": arima_preds, "LightGBM": lgbm_preds, "LSTM": lstm_preds}
                 )
@@ -270,7 +257,7 @@ if __name__ == "__main__":
                 max_preds = forecast_df.max(axis=1)
                 mean_preds = forecast_df.mean(axis=1)
 
-                # --- 시각화 ---
+                # --- 시각화 (수정 없음) ---
                 fig = make_subplots(
                     rows=4,
                     cols=1,
@@ -278,8 +265,6 @@ if __name__ == "__main__":
                     vertical_spacing=0.05,
                     row_heights=[0.5, 0.1, 0.2, 0.2],
                 )
-
-                # 1. 캔들차트, 이평선, 매매신호, 예측 결과 (밴드)
                 fig.add_trace(
                     go.Candlestick(
                         x=df.index,
@@ -314,9 +299,6 @@ if __name__ == "__main__":
                     row=1,
                     col=1,
                 )
-
-                # ✨ 예측 범위를 밴드로 추가 ✨
-                # 상한선과 하한선을 투명한 선으로 먼저 그리고, 그 사이를 채웁니다.
                 fig.add_trace(
                     go.Scatter(
                         x=max_preds.index,
@@ -341,7 +323,6 @@ if __name__ == "__main__":
                     row=1,
                     col=1,
                 )
-                # 예측 평균선을 점선으로 추가
                 fig.add_trace(
                     go.Scatter(
                         x=mean_preds.index,
@@ -353,8 +334,6 @@ if __name__ == "__main__":
                     row=1,
                     col=1,
                 )
-
-                # 나머지 차트 (거래량, RSI, MACD)는 기존과 동일
                 colors = [
                     "green" if row["Open"] - row["Close"] >= 0 else "red"
                     for index, row in df.iterrows()
@@ -414,8 +393,6 @@ if __name__ == "__main__":
                     row=4,
                     col=1,
                 )
-
-                # 레이아웃 업데이트
                 fig.update_layout(
                     title_text=f"{ticker} 종합 기술적 분석 및 주가 예측",
                     height=900,
@@ -428,13 +405,10 @@ if __name__ == "__main__":
                 fig.update_yaxes(title_text="거래량", row=2, col=1)
                 fig.update_yaxes(title_text="RSI", row=3, col=1)
                 fig.update_yaxes(title_text="MACD", row=4, col=1)
-
                 st.plotly_chart(fig, use_container_width=True)
-
                 st.header("🔮 모델별 예측 결과")
                 st.dataframe(forecast_df.style.format("{:,.0f}"))
                 with st.expander("상세 데이터 보기"):
                     st.dataframe(df.iloc[::-1].style.format("{:,.2f}"))
-
         except Exception as e:
             st.error(f"분석 중 오류가 발생했습니다: {e}")

@@ -1,3 +1,9 @@
 streamlit
 pandas
 finance-datareader
+plotly
+statsmodels
+lightgbm
+scikit-learn
+torch
+numpy
