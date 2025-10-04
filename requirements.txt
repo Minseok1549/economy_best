@@ -10,4 +10,4 @@ statsmodels
 prophet
 requests
 beautifulsoup4
-FinanceDataReader
+finance-datareader
