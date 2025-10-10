@@ -1,14 +1,23 @@
+# --- Streamlit App & Data Handling ---
 streamlit
 pandas
 plotly
 numpy
+
+# --- Data Fetching & Scraping ---
 yfinance
 pykrx
+requests
+beautifulsoup4
+FinanceDataReader
+
+# --- Supervised Learning (지도학습) ---
 xgboost
 scikit-learn
 statsmodels
 prophet
-requests
-beautifulsoup4
-finance-datareader
-setuptools
+
+# --- Reinforcement Learning (강화학습) ---
+stable-baselines3
+gymnasium
+torch

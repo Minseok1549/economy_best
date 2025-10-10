@@ -12,7 +12,10 @@ from prophet.serialize import model_from_json
 warnings.filterwarnings("ignore")
 
 # --- 모델 저장 경로 ---
-MODEL_SAVE_PATH = "saved_models"
+MODEL_SAVE_PATH = "models"
+FORECAST_DATA_PATH = "data/forecasts"
+if not os.path.exists(FORECAST_DATA_PATH):
+    os.makedirs(FORECAST_DATA_PATH)
 
 
 # --- 메인 예측 함수 ---
@@ -99,7 +102,7 @@ def generate_forecasts_from_saved_models(ticker: str):
 
     next_day = df.index[-1] + dt.timedelta(days=1)
     forecast_df = pd.DataFrame(predictions, index=[next_day])
-    output_path = f"{ticker}_forecast.csv"
+    output_path = os.path.join(FORECAST_DATA_PATH, f"{ticker}_forecast.csv")
     forecast_df.to_csv(output_path)
     print(f" > [{ticker}] 예측 완료. '{output_path}'에 저장되었습니다.\n")
 

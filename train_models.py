@@ -19,7 +19,7 @@ from statsmodels.tsa.api import ExponentialSmoothing
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-MODEL_SAVE_PATH = "saved_models"
+MODEL_SAVE_PATH = "models"
 if not os.path.exists(MODEL_SAVE_PATH):
     os.makedirs(MODEL_SAVE_PATH)
 

@@ -1,6 +1,16 @@
+# -*- coding: utf-8 -*-
+"""
+개인 투자 전략 어시스턴트 (v4.0 Final)
+
+- 최종 기능: 강화학습(RL) 에이전트의 매매 결정을 대시보드에 통합
+- 모든 기능이 포함된 최종 버전의 Streamlit 애플리케이션 스크립트
+"""
+
+# --- 1. 라이브러리 임포트 ---
 from __future__ import annotations
 
 import datetime as dt
+import json
 import warnings
 
 import FinanceDataReader as fdr
@@ -17,13 +27,16 @@ from pykrx import stock
 # 경고 메시지 무시
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+
 # --- 2. 페이지 기본 설정 ---
 PAGE_CONFIG = {
     "layout": "wide",
-    "page_title": "개인 투자 전략 어시스턴트",
-    "page_icon": "💡",
+    "page_title": "AI 투자 전략 어시스턴트",
+    "page_icon": "🚀",
 }
 st.set_page_config(**PAGE_CONFIG)
+
+DEFAULT_TICKERS = ["TSLA", "IONQ", "RGTI", "PLTR", "ALB", "RR"]
 
 
 # --- 3. 핵심 데이터 처리 및 분석 함수 ---
@@ -38,9 +51,22 @@ def load_stock_data(ticker: str) -> pd.DataFrame | None:
 
 
 def load_forecast_data(ticker: str) -> pd.DataFrame | None:
-    """사전에 생성된 예측 데이터를 로드합니다."""
+    """사전에 생성된 지도학습 예측 데이터를 로드합니다."""
     try:
-        return pd.read_csv(f"{ticker}_forecast.csv", index_col=0, parse_dates=True)
+        return pd.read_csv(
+            f"data/forecasts/{ticker}_forecast.csv", index_col=0, parse_dates=True
+        )
+
+    except FileNotFoundError:
+        return None
+
+
+def load_rl_signal(ticker: str) -> dict | None:
+    """사전에 생성된 강화학습 에이전트의 신호를 로드합니다."""
+    try:
+        # 경로 수정: signals -> rl_signals
+        with open(f"data/signals/{ticker}_rl_signal.json", "r") as f:
+            return json.load(f)
     except FileNotFoundError:
         return None
 
@@ -52,7 +78,7 @@ def get_usd_krw_rate() -> float:
         df = fdr.DataReader("USD/KRW", start=dt.date.today() - dt.timedelta(days=30))
         return df["Close"].iloc[-1]
     except Exception:
-        return 1300.0  # 실패 시 기본값
+        return 1350.0  # 실패 시 기본값
 
 
 @st.cache_data(ttl=3600)
@@ -78,7 +104,7 @@ def get_fundamental_info(ticker: str) -> dict:
             info["marcap"] = mc_df.loc[ticker, "시가총액"]
             info["news"] = get_naver_news(ticker)
         except Exception:
-            pass  # 정보가 없는 경우 기본값 사용
+            pass
     else:  # 해외 주식 (yfinance)
         try:
             yticker = yf.Ticker(ticker)
@@ -90,7 +116,7 @@ def get_fundamental_info(ticker: str) -> dict:
             info["pbr"] = yinfo.get("priceToBook", 0)
             news_raw = yticker.news
             info["news"] = [
-                {"title": n["title"], "link": n["link"]} for n in news_raw[:3]
+                {"title": n["title"], "link": n["link"]} for n in news_raw[:5]
             ]
         except Exception:
             pass
@@ -99,13 +125,13 @@ def get_fundamental_info(ticker: str) -> dict:
 
 @st.cache_data(ttl=600)
 def get_naver_news(ticker: str) -> list:
-    """네이버 금융에서 최신 뉴스 헤드라인 3개를 스크레이핑합니다."""
+    """네이버 금융에서 최신 뉴스 헤드라인 5개를 스크레이핑합니다."""
     news_list = []
     try:
         url = f"https://finance.naver.com/item/news_news.naver?code={ticker}&page=1"
         response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(response.text, "html.parser")
-        for row in soup.select("table.type5 tr")[:3]:
+        for row in soup.select("table.type5 tr")[:5]:
             title_tag = row.select_one("td.title a")
             if title_tag:
                 news_list.append(
@@ -139,7 +165,6 @@ def add_all_indicators(df: pd.DataFrame, params: dict) -> pd.DataFrame:
 
 def get_final_signal_and_targets(df: pd.DataFrame, params: dict) -> dict:
     """기술적 지표를 종합하여 최종 신호와 목표가를 생성합니다."""
-    # 1. 개별 신호 생성
     signals, latest, previous = {}, df.iloc[-1], df.iloc[-2]
     ma_short, ma_long = f"MA_{params['ma_short']}", f"MA_{params['ma_long']}"
     if latest[ma_short] > latest[ma_long] and previous[ma_short] <= previous[ma_long]:
@@ -155,7 +180,6 @@ def get_final_signal_and_targets(df: pd.DataFrame, params: dict) -> dict:
     elif latest["MACD"] < latest["Signal"] and previous["MACD"] >= previous["Signal"]:
         signals["macd"] = -1
 
-    # 2. 최종 신호 결정
     score = sum(signals.values())
     if score >= 2:
         final_signal = ("🟢 강력 매수", f"{score}개 지표 매수")
@@ -168,11 +192,8 @@ def get_final_signal_and_targets(df: pd.DataFrame, params: dict) -> dict:
     else:
         final_signal = ("⚪️ 관망", "신호 혼재")
 
-    # 3. 목표가 및 손절가 계산
-    recent_60 = df.iloc[-60:]
-    resistance = recent_60["High"].max()
-    support = recent_60["Low"].min()
-
+    resistance = df.iloc[-60:]["High"].max()
+    support = df.iloc[-60:]["Low"].min()
     return {"signal": final_signal, "target": resistance, "loss_cut": support}
 
 
@@ -181,14 +202,14 @@ def setup_sidebar() -> tuple[str, dict, bool]:
     """사이드바 UI 구성"""
     with st.sidebar:
         st.header("⚙️ 설정")
-        ticker = st.selectbox(
-            "종목 선택", ["005930", "TSLA", "035720", "AAPL", "000660"]
-        )
+        # ★★★ 변경점: 하드코딩된 리스트 대신 위에서 정의한 변수 사용
+        ticker = st.selectbox("종목 선택", DEFAULT_TICKERS)
         custom_ticker = st.text_input(
             "또는 종목 코드 직접 입력", placeholder="예: GOOGL"
         )
         if custom_ticker:
             ticker = custom_ticker.upper()
+
         st.divider()
         st.subheader("차트 설정")
         params = {
@@ -204,6 +225,7 @@ def display_strategy_panel(
     df: pd.DataFrame,
     strategy: dict,
     forecast: pd.DataFrame | None,
+    rl_signal: dict | None,
     krw_rate: float,
     is_kr_stock: bool,
 ):
@@ -212,39 +234,60 @@ def display_strategy_panel(
     current_price = df.iloc[-1]["Close"]
     unit = "원" if is_kr_stock else "달러"
 
-    col1, col2 = st.columns(2)
-    with col1:  # 최종 신호
-        st.metric("최종 투자 신호", strategy["signal"][0], help=strategy["signal"][1])
+    col1, col2 = st.columns([1.2, 1.8])
+    with col1:
+        st.subheader("룰 기반 신호")
+        # 경고 메시지 해결
+        st.metric(
+            label="룰 기반 신호",
+            value=strategy["signal"][0],
+            help=strategy["signal"][1],
+            label_visibility="hidden",
+        )
         st.write(f"현재가: **{current_price:,.2f} {unit}**")
         if not is_kr_stock:
             st.caption(f"KRW: 약 {(current_price * krw_rate):,.0f} 원")
 
-    with col2:  # 목표가 및 손절가
-        target_delta = f"{(strategy['target'] / current_price - 1) * 100:.1f}%"
-        loss_cut_delta = f"{(strategy['loss_cut'] / current_price - 1) * 100:.1f}%"
-        st.metric(
-            "🎯 1차 목표가 (저항선)",
-            f"{strategy['target']:,.2f} {unit}",
-            delta=target_delta,
-        )
-        st.metric(
-            "🛡️ 손절가 (지지선)",
-            f"{strategy['loss_cut']:,.2f} {unit}",
-            delta=loss_cut_delta,
-            delta_color="inverse",
-        )
+    with col2:
+        st.subheader("AI 트레이더의 결정 (RL)")
+        if rl_signal:
+            # 경고 메시지 해결
+            st.metric(
+                label="AI 트레이더 결정",
+                value=rl_signal["signal"],
+                help=rl_signal["reason"],
+                label_visibility="hidden",
+            )
+        else:
+            st.info("강화학습 에이전트의 신호가 없습니다.")
 
     st.divider()
-    st.subheader("🤖 AI 예측 요약")
+    st.subheader("가격 목표 (지지/저항)")
+    col1, col2, col3 = st.columns(3)
+    target_delta = f"{(strategy['target'] / current_price - 1) * 100:.1f}%"
+    loss_cut_delta = f"{(strategy['loss_cut'] / current_price - 1) * 100:.1f}%"
+    col1.metric(
+        "🎯 1차 목표가", f"{strategy['target']:,.2f} {unit}", delta=target_delta
+    )
+    col2.metric(
+        "🛡️ 손절가",
+        f"{strategy['loss_cut']:,.2f} {unit}",
+        delta=loss_cut_delta,
+        delta_color="inverse",
+    )
+
+    st.divider()
+    st.subheader("AI 가격 예측 (지도학습)")
     if forecast is not None:
         mean_pred = forecast.mean(axis=1).iloc[0]
-        std_pred = forecast.std(axis=1).iloc[0]
         st.metric("다음 거래일 평균 예측가", f"{mean_pred:,.2f} {unit}")
-        confidence = max(0, 100 - (std_pred / mean_pred * 200))
+        confidence = max(0, 100 - (forecast.std(axis=1).iloc[0] / mean_pred * 200))
         st.progress(int(confidence), text=f"예측 신뢰도: {confidence:.1f} / 100")
     else:
-        st.info("예측 데이터를 찾을 수 없습니다.")
-    st.caption("주의: 본 정보는 알고리즘 분석 결과이며, 투자 추천이 아닙니다.")
+        st.info("가격 예측 데이터를 찾을 수 없습니다.")
+    st.caption(
+        "주의: 본 정보는 알고리즘 분석 결과이며 투자 추천이 아닙니다. 모든 투자의 책임은 본인에게 있습니다."
+    )
 
 
 def display_charts(
@@ -252,14 +295,12 @@ def display_charts(
     forecast: pd.DataFrame | None,
     params: dict,
     show_bb: bool,
-    krw_rate: float,
     is_kr_stock: bool,
 ):
     """'상세 차트' 탭의 내용을 표시합니다."""
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.8, 0.2]
     )
-    # 가격 차트
     fig.add_trace(
         pgo.Candlestick(
             x=df.index,
@@ -293,8 +334,10 @@ def display_charts(
         col=1,
     )
     if show_bb:
-        ma20 = df["Close"].rolling(window=20).mean()
-        std20 = df["Close"].rolling(window=20).std()
+        ma20, std20 = (
+            df["Close"].rolling(window=20).mean(),
+            df["Close"].rolling(window=20).std(),
+        )
         fig.add_trace(
             pgo.Scatter(
                 x=df.index, y=ma20 + (std20 * 2), line=dict(width=0), showlegend=False
@@ -315,8 +358,7 @@ def display_charts(
             col=1,
         )
     if forecast is not None:
-        next_day = forecast.index[0]
-        mean_pred = forecast.mean(axis=1).iloc[0]
+        next_day, mean_pred = forecast.index[0], forecast.mean(axis=1).iloc[0]
         fig.add_trace(
             pgo.Candlestick(
                 x=[next_day],
@@ -330,19 +372,20 @@ def display_charts(
             row=1,
             col=1,
         )
-    # 거래량 차트
+
     fig.add_trace(
         pgo.Bar(x=df.index, y=df["Volume"], name="거래량", marker_color="lightgray"),
         row=2,
         col=1,
     )
-    unit = "원" if is_kr_stock else "USD"
     fig.update_layout(
         title_text="<b>가격 및 거래량 차트</b>",
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    fig.update_yaxes(title_text=f"가격 ({unit})", row=1, col=1)
+    fig.update_yaxes(
+        title_text=f"가격 ({'원' if is_kr_stock else 'USD'})", row=1, col=1
+    )
     fig.update_yaxes(title_text="거래량", row=2, col=1)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -350,15 +393,13 @@ def display_charts(
 def display_info_and_news(info: dict):
     """'기업 정보 및 뉴스' 탭의 내용을 표시합니다."""
     st.header(f"🏢 {info.get('name', 'N/A')} 기업 정보")
-
     col1, col2, col3 = st.columns(3)
-    col1.metric("시가총액", f"{(info.get('marcap', 0) / 100000000):,.0f} 억원")
+    col1.metric("시가총액", f"{(info.get('marcap', 0) / 100000000):,.0f} 억 달러")
     col2.metric("PER", f"{info.get('per', 0):.2f}")
     col3.metric("PBR", f"{info.get('pbr', 0):.2f}")
 
     with st.expander("사업 요약 보기"):
         st.write(info.get("summary", "제공된 요약 정보가 없습니다."))
-
     st.divider()
     st.subheader("📰 최신 뉴스")
     if info["news"]:
@@ -371,7 +412,7 @@ def display_info_and_news(info: dict):
 # --- 5. 메인 애플리케이션 실행부 ---
 def main():
     """메인 애플리케이션을 실행합니다."""
-    st.title("💡 개인 투자 전략 어시스턴트")
+    st.title("🚀 AI 투자 전략 어시스턴트")
 
     ticker, params, show_bb = setup_sidebar()
     stock_data = load_stock_data(ticker)
@@ -383,8 +424,9 @@ def main():
     is_kr_stock = ticker.isdigit()
     krw_rate = 1.0 if is_kr_stock else get_usd_krw_rate()
 
-    # 데이터 처리
+    # 데이터 처리 및 신호 생성
     forecast_data = load_forecast_data(ticker)
+    rl_signal_data = load_rl_signal(ticker)
     data_with_indicators = add_all_indicators(stock_data.copy(), params)
     strategy = get_final_signal_and_targets(data_with_indicators, params)
     fundamental_info = get_fundamental_info(ticker)
@@ -393,11 +435,16 @@ def main():
     tab1, tab2, tab3 = st.tabs(["💡 투자 전략", "📈 상세 차트", "📰 기업 정보"])
     with tab1:
         display_strategy_panel(
-            data_with_indicators, strategy, forecast_data, krw_rate, is_kr_stock
+            data_with_indicators,
+            strategy,
+            forecast_data,
+            rl_signal_data,
+            krw_rate,
+            is_kr_stock,
         )
     with tab2:
         display_charts(
-            data_with_indicators, forecast_data, params, show_bb, krw_rate, is_kr_stock
+            data_with_indicators, forecast_data, params, show_bb, is_kr_stock
         )
     with tab3:
         display_info_and_news(fundamental_info)
