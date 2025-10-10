@@ -1,3 +1,5 @@
+# requirements.txt
+
 # --- Streamlit App & Data Handling ---
 streamlit
 pandas
@@ -9,7 +11,7 @@ yfinance
 pykrx
 requests
 beautifulsoup4
-FinanceDataReader
+finance-datareader
 
 # --- Supervised Learning (지도학습) ---
 xgboost
