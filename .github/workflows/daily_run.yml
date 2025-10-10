@@ -1,13 +1,18 @@
 name: Run Daily Batch Job
 
 on:
-  workflow_dispatch: # 수동으로 실행할 수 있도록 버튼 추가
+  workflow_dispatch:
   schedule:
     - cron: "0 23 * * *" # 매일 UTC 23:00 (한국 시간 오전 8시)에 실행
 
 jobs:
   build-and-run:
     runs-on: ubuntu-latest
+
+    # ★★★ 이 부분을 추가하세요 ★★★
+    permissions:
+      contents: write # 저장소에 코드를 쓸 수 있는 권한 부여
+
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
@@ -15,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.11" # requirements.txt에 맞는 파이썬 버전
+          python-version: "3.10"
 
       - name: Install Dependencies
         run: |
